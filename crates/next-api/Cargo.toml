@@ -26,7 +26,6 @@ either = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 indexmap = { workspace = true }
-itertools = { workspace = true }
 next-core = { workspace = true }
 regex = { workspace = true }
 roaring = { workspace = true }
