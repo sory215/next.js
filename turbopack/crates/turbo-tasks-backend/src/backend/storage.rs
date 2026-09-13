@@ -521,6 +521,26 @@ impl Storage {
         }
     }
 
+    /// Like [`Self::access_mut`], but keeps the map entry so the caller can still remove it.
+    ///
+    /// [`Self::access_mut`] discards the `OccupiedEntry` that `entry()` produced, and a plain
+    /// `RefMut` holds only `&mut V` — the hashtable slot is no longer reachable through it, so
+    /// removing the task afterwards costs a second write lock on the same shard. A caller that may
+    /// need to undo its own insert (see [`TaskEntryGuard::discard`]) should open the task this way
+    /// instead.
+    pub fn access_entry_mut(&self, key: TaskId) -> TaskEntryGuard<'_> {
+        let entry = match self.map.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(e) => e,
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                e.insert_entry(Box::new(TaskStorage::new()))
+            }
+        };
+        TaskEntryGuard {
+            storage: self,
+            entry,
+        }
+    }
+
     /// Read-only access to an already resident task. Returns `None` if the task isnt in memory
     /// resident. The closure runs while a shard read lock is held, so it must be cheap and must
     /// not re-enter the map.
@@ -829,6 +849,52 @@ impl Storage {
         span.record("counts", tracing::field::display(&totals));
 
         totals
+    }
+}
+
+/// A write guard that still owns its map entry, so the task can be removed under the lock that is
+/// already held.
+///
+/// Use [`Storage::access_entry_mut`] to obtain one. Convert it with [`Self::into_write_guard`] once
+/// removal is no longer a possibility, or call [`Self::discard`] to drop the entry outright.
+pub struct TaskEntryGuard<'a> {
+    storage: &'a Storage,
+    entry: dashmap::mapref::entry::OccupiedEntry<'a, TaskId, Box<TaskStorage>>,
+}
+
+impl<'a> TaskEntryGuard<'a> {
+    /// Removes this task's entry, undoing the insert that opening it performed.
+    ///
+    /// `access_entry_mut` has to materialize an entry before the caller can tell whether the task
+    /// exists at all, and a restore attempt then marks it restored even though it restored
+    /// *nothing* — the task was absent from disk. Left in the map, that entry is indistinguishable
+    /// from a live task that simply has not been restored yet, so GC treats it as collectible and
+    /// deletes it, producing a `Delete` snapshot item for a task with no persistent task type.
+    ///
+    /// Only call this having just established that the task does not exist.
+    pub fn discard(self) {
+        self.entry.remove();
+    }
+
+    /// Gives up the ability to remove the entry, yielding an ordinary write guard.
+    pub fn into_write_guard(self) -> StorageWriteGuard<'a> {
+        StorageWriteGuard {
+            storage: self.storage,
+            inner: self.entry.into_ref().into(),
+        }
+    }
+}
+
+impl std::ops::Deref for TaskEntryGuard<'_> {
+    type Target = TaskStorage;
+    fn deref(&self) -> &Self::Target {
+        self.entry.get()
+    }
+}
+
+impl std::ops::DerefMut for TaskEntryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.entry.get_mut()
     }
 }
 
