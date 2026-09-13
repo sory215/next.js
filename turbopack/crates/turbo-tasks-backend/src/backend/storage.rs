@@ -573,8 +573,8 @@ impl Storage {
         self.map.shards().len()
     }
 
-    /// Iterates the non-transient tasks of a **single** shard of the resident map by index, under
-    /// that shard's read lock.
+    /// Iterates the tasks of a **single** shard of the resident map by index, under that shard's
+    /// read lock.
     fn for_each_resident_persistent_in_shard(
         &self,
         index: usize,
@@ -589,10 +589,25 @@ impl Storage {
         }
     }
 
-    /// Scans a **single** shard by index, invoking `on_candidate` for each resident, non-transient
-    /// task whose storage passes the cheap [`TaskStorage::gc_maybe_collectible`] pre-filter.
+    /// Visits every resident task in the shard, transient tasks included.
+    fn for_each_resident_in_shard(&self, index: usize, mut f: impl FnMut(TaskId, &TaskStorage)) {
+        let shard = self.map.shards()[index].read();
+        for (task_id, task) in shard.iter() {
+            f(*task_id, task);
+        }
+    }
+
+    /// Scans a **single** shard by index, invoking `on_candidate` for each resident task whose
+    /// storage passes [`TaskStorage::gc_maybe_collectible`].
+    ///
+    /// Transient tasks are included: they are session-scoped but a session can be long, so leaving
+    /// them uncollected retains whole subgraphs for the life of the process. Collecting them was
+    /// previously blocked by two failures, both fixed by making stale references weak rather than
+    /// fatal — see `TaskAccess::Weak`: a `MustExist` panic when an invalidator named a collected
+    /// task, and a `Delete` snapshot item for a task with no task type when the entry a weak open
+    /// had to materialize was left behind and re-collected.
     pub fn gc_scan_shard(&self, index: usize, mut on_candidate: impl FnMut(TaskId)) {
-        self.for_each_resident_persistent_in_shard(index, |task_id, storage| {
+        self.for_each_resident_in_shard(index, |task_id, storage| {
             if storage.gc_maybe_collectible() {
                 on_candidate(task_id);
             }
@@ -611,7 +626,7 @@ impl Storage {
             parallel::map_collect(&(0..self.shard_count()).collect::<Vec<_>>(), |&index| {
                 let mut roots = Vec::new();
                 self.for_each_resident_persistent_in_shard(index, |task_id, storage| {
-                    if storage.gc_is_root() {
+                    if !task_id.is_transient() && storage.gc_is_root() {
                         // The `is_root` criteria is conservative, in debug assert that we aren't
                         // marking things as roots for surprising reasons
                         #[cfg(debug_assertions)]
