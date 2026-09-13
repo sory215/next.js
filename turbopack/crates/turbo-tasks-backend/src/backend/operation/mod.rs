@@ -1404,6 +1404,12 @@ pub trait TaskGuard: Debug + TaskStorageAccessors {
         new_value
     }
 
+    /// Adds one *unowned* entry-point reference, keeping the marker bit set so it stays
+    /// distinguishable from references a handle will release. See `ConnectChildOperation::run`.
+    fn add_entry_ref(&mut self) {
+        self.update_and_get_transient_ref_count(1);
+    }
+
     /// Whether a GC pass may collect this task: it is non-transient and nothing references it.
     ///
     /// How much this proves depends on the guard's category — with only `Meta` open it is a sound
